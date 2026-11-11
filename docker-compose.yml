@@ -1,0 +1,94 @@
+x-postgres: &postgres
+  image: postgres:18-alpine
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d $$POSTGRES_DB"]
+    interval: 30s
+    timeout: 3s
+    retries: 5
+    start_period: 30s
+    start_interval: 2s
+  networks:
+    - backend
+
+services:
+  db:
+    <<: *postgres
+    container_name: library-db
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: library
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+  api:
+    build:
+      context: ./api
+      target: runtime
+    container_name: library-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/library
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./api/app
+          target: /srv/app/app
+        - action: sync+restart
+          path: ./api/migrations
+          target: /srv/app/migrations
+        - action: rebuild
+          path: ./api/pyproject.toml
+        - action: rebuild
+          path: ./api/uv.lock
+
+  db-test:
+    <<: *postgres
+    container_name: library-db-test
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: library_test
+    tmpfs:
+      - /var/lib/postgresql
+
+  test:
+    build:
+      context: ./api
+      target: test
+    container_name: library-test
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db-test:5432/library_test
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@db-test:5432/library_test
+    entrypoint: ["./scripts/watch-tests.sh"]
+    volumes:
+      - ./api/app:/srv/app/app:ro
+      - ./api/tests:/srv/app/tests:ro
+      - ./api/migrations:/srv/app/migrations:ro
+      - ./api/alembic.ini:/srv/app/alembic.ini:ro
+      - ./api/pyproject.toml:/srv/app/pyproject.toml:ro
+      - ./api/scripts:/srv/app/scripts:ro
+    networks:
+      - backend
+    depends_on:
+      db-test:
+        condition: service_healthy
+
+  test-once:
+    extends:
+      service: test
+    container_name: library-test-once
+    profiles:
+      - test-once
+    entrypoint: ["./scripts/run-tests.sh"]
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
+    driver: bridge
